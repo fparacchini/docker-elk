@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd /opt/docker-elk && sudo docker compose -f docker-compose\\.yml -f extensions/filebeat/filebeat-compose\\.yml logs --tail=200 2>&1$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

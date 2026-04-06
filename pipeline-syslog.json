@@ -1,0 +1,587 @@
+{
+  "description": "OpenWRT syslog (dnsmasq, dawn, hostapd) > ECS mapping with forwarded messages support (syslog-ng + logd via Filebeat)",
+  "version": 5,
+  "_meta": {
+    "owner": "Fabio Paracchini",
+    "ecs": true,
+    "sources": [
+      "syslog-ng",
+      "logd"
+    ]
+  },
+  "processors": [
+    {
+      "pipeline": {
+        "name": "logs-syslog@ingest",
+        "ignore_missing_pipeline": true
+      }
+    },
+    {
+      "set": {
+        "tag": "baseline_kind",
+        "field": "event.kind",
+        "value": "event",
+        "ignore_failure": true
+      }
+    },
+
+    /* --- FIRST: detect forwarded lines (syslog-ng) so normalization can skip them --- */
+    {
+      "grok": {
+        "tag": "extract_forwarded_host",
+        "if": "ctx.message != null && ctx.message.contains(': ')",
+        "field": "message",
+        "patterns": [
+          "^%{HOSTNAME:_tmp.original_host}: %{GREEDYDATA:_tmp.forwarded_message}"
+        ],
+        "ignore_failure": true
+      }
+    },
+
+    /* --- NORMALIZATION for direct logd via Filebeat (not forwarded) --- */
+    {
+      "set": {
+        "tag": "observer_is_collector",
+        "if": "ctx._tmp?.original_host == null && ctx.log?.syslog?.hostname != null && ctx.host?.hostname != null && ctx.host.hostname != ctx.log.syslog.hostname",
+        "field": "observer.hostname",
+        "value": "{{host.hostname}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "origin_host_from_syslog",
+        "if": "ctx._tmp?.original_host == null && ctx.log?.syslog?.hostname != null && (ctx.host?.hostname == null || ctx.host.hostname != ctx.log.syslog.hostname)",
+        "field": "host.hostname",
+        "value": "{{log.syslog.hostname}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "append": {
+        "tag": "mark_logd",
+        "if": "ctx._tmp?.original_host == null && ctx.log?.syslog?.hostname != null && ctx.observer?.hostname != null && ctx.observer.hostname != ctx.host?.hostname",
+        "field": "tags",
+        "value": [
+          "logd"
+        ],
+        "allow_duplicates": false,
+        "ignore_failure": true
+      }
+    },
+
+    /* --- FORWARDED handling (syslog-ng) --- */
+    {
+      "set": {
+        "tag": "set_original_host_from_forward",
+        "if": "ctx._tmp?.original_host != null",
+        "field": "host.hostname",
+        "value": "{{_tmp.original_host}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "use_forwarded_message",
+        "if": "ctx._tmp?.forwarded_message != null",
+        "field": "message",
+        "value": "{{_tmp.forwarded_message}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "set_forwarder_info",
+        "if": "ctx._tmp?.original_host != null && ctx.log?.syslog?.hostname != null",
+        "field": "observer.hostname",
+        "value": "{{log.syslog.hostname}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "append": {
+        "tag": "add_forwarded_tag",
+        "if": "ctx._tmp?.original_host != null",
+        "field": "tags",
+        "value": [
+          "forwarded"
+        ],
+        "allow_duplicates": false,
+        "ignore_failure": true
+      }
+    },
+
+    /* --- SYSLOG SEVERITY MAPPING --- */
+    {
+      "set": {
+        "tag": "syslog_severity_extract",
+        "if": "ctx.log?.syslog?.severity != null",
+        "field": "log.level",
+        "value": "{{log.syslog.severity}}",
+        "ignore_failure": true
+      }
+    },
+
+    /* --- BASE CLASSIFICATION --- */
+    {
+      "set": {
+        "tag": "baseline_category",
+        "if": "['dnsmasq','dnsmasq-dhcp','dawn','hostapd'].contains(ctx.log?.syslog?.appname)",
+        "field": "event.category",
+        "value": [
+          "network"
+        ],
+        "ignore_failure": true
+      }
+    },
+
+    /* --- DNSMASQ RULES --- */
+    {
+      "gsub": {
+        "tag": "dnsmasq_strip_prefix",
+        "if": "ctx.log?.syslog?.appname == 'dnsmasq' && ctx.message != null",
+        "field": "message",
+        "pattern": "^[0-9]+\\s[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+/[0-9]+\\s",
+        "replacement": "",
+        "ignore_failure": true
+      }
+    },
+    {
+      "dissect": {
+        "tag": "dnsmasq_query",
+        "if": "ctx.log?.syslog?.appname == 'dnsmasq' && ctx.message != null && ctx.message.startsWith('query')",
+        "field": "message",
+        "pattern": "query[%{_tmp.dns_query_type}] %{_tmp.dns_query_name} from %{_tmp.client_ip}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_query_ecs",
+        "if": "ctx._tmp?.dns_query_name != null",
+        "field": "dns.question.name",
+        "value": "{{_tmp.dns_query_name}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_query_type",
+        "if": "ctx._tmp?.dns_query_type != null",
+        "field": "dns.question.type",
+        "value": "{{_tmp.dns_query_type}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_query_type_flag",
+        "if": "ctx._tmp?.dns_query_name != null",
+        "field": "dns.type",
+        "value": "query",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_query_action",
+        "if": "ctx._tmp?.dns_query_name != null",
+        "field": "event.action",
+        "value": "dns_query",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_query_transport",
+        "if": "ctx._tmp?.dns_query_name != null",
+        "field": "network.transport",
+        "value": "udp",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_query_port",
+        "if": "ctx._tmp?.dns_query_name != null",
+        "field": "destination.port",
+        "value": 53,
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_source_ip",
+        "if": "ctx._tmp?.client_ip != null",
+        "field": "source.ip",
+        "value": "{{_tmp.client_ip}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_client_ip",
+        "if": "ctx._tmp?.client_ip != null",
+        "field": "client.ip",
+        "value": "{{_tmp.client_ip}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "registered_domain": {
+        "tag": "dnsmasq_regdom",
+        "if": "ctx.dns?.question?.name != null",
+        "field": "dns.question.name",
+        "target_field": "dns.question.registered_domain",
+        "ignore_failure": true
+      }
+    },
+    {
+      "dissect": {
+        "tag": "dnsmasq_forwarded",
+        "if": "ctx.log?.syslog?.appname == 'dnsmasq' && ctx.message != null && ctx.message.startsWith('forwarded ')",
+        "field": "message",
+        "pattern": "forwarded %{_tmp.dns_forward_name} to %{_tmp.forward_to}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_forward_name",
+        "if": "ctx._tmp?.dns_forward_name != null",
+        "field": "dns.question.name",
+        "value": "{{_tmp.dns_forward_name}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "grok": {
+        "tag": "dnsmasq_forward_ip_extract",
+        "if": "ctx._tmp?.forward_to != null",
+        "field": "_tmp.forward_to",
+        "patterns": [
+          "%{IP:_tmp.forward_ip}"
+        ],
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_server_ip",
+        "if": "ctx._tmp?.forward_ip != null",
+        "field": "server.ip",
+        "value": "{{_tmp.forward_ip}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_destination_ip",
+        "if": "ctx.server?.ip != null",
+        "field": "destination.ip",
+        "value": "{{server.ip}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "dissect": {
+        "tag": "dnsmasq_reply",
+        "if": "ctx.log?.syslog?.appname == 'dnsmasq' && ctx.message != null && (ctx.message.startsWith('reply ') || ctx.message.startsWith('cached '))",
+        "field": "message",
+        "pattern": "%{_tmp.reply_verb} %{_tmp.dns_answer_name} is %{_tmp.dns_answer_data}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_answer_type",
+        "if": "ctx._tmp?.dns_answer_data != null",
+        "field": "dns.type",
+        "value": "answer",
+        "ignore_failure": true
+      }
+    },
+    {
+      "script": {
+        "tag": "dnsmasq_answers_array",
+        "if": "ctx._tmp?.dns_answer_data != null",
+        "lang": "painless",
+        "source": "if (ctx.dns == null) ctx.dns = new HashMap(); if (ctx.dns.answers == null) ctx.dns.answers = new ArrayList(); Map ans = new HashMap(); ans.put(\"data\", ctx._tmp.dns_answer_data); ctx.dns.answers.add(ans);"
+      }
+    },
+    {
+      "set": {
+        "tag": "dnsmasq_reply_action",
+        "if": "ctx._tmp?.dns_answer_data != null",
+        "field": "event.action",
+        "value": "dns_reply",
+        "ignore_failure": true
+      }
+    },
+
+    /* --- DHCP (dnsmasq-dhcp) --- */
+    {
+      "dissect": {
+        "tag": "dhcp_line",
+        "if": "(ctx.log?.syslog?.appname == 'dnsmasq-dhcp') || (ctx.log?.syslog?.appname == 'dnsmasq' && ctx.message != null && ctx.message.startsWith('DHCP'))",
+        "field": "message",
+        "pattern": "%{_dhcp.action}(%{_dhcp.iface}) %{?_dhcp.ip} %{_dhcp.mac} %{?_dhcp.hostname}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dhcp_event_action",
+        "if": "ctx._dhcp?.action != null",
+        "field": "event.action",
+        "value": "{{_dhcp.action}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dhcp_transport",
+        "if": "ctx._dhcp != null",
+        "field": "network.transport",
+        "value": "udp",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dhcp_iface",
+        "if": "ctx._dhcp?.iface != null",
+        "field": "network.interface.name",
+        "value": "{{_dhcp.iface}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dhcp_source_mac",
+        "if": "ctx._dhcp?.mac != null",
+        "field": "source.mac",
+        "value": "{{_dhcp.mac}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dhcp_source_ip_set",
+        "if": "ctx._dhcp?.ip != null",
+        "field": "source.ip",
+        "value": "{{_dhcp.ip}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dhcp_source_domain",
+        "if": "ctx._dhcp?.hostname != null",
+        "field": "source.domain",
+        "value": "{{_dhcp.hostname}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "grok": {
+        "tag": "dhcp_lease_extract",
+        "if": "ctx.message != null && (ctx.log?.syslog?.appname == 'dnsmasq-dhcp' || (ctx.log?.syslog?.appname == 'dnsmasq' && ctx.message.startsWith('DHCP')))",
+        "field": "message",
+        "patterns": [
+          "lease time %{NUMBER:dhcp.lease_time:long}"
+        ],
+        "ignore_failure": true
+      }
+    },
+
+    /* --- DAWN --- */
+    {
+      "dissect": {
+        "tag": "dawn_probe_head",
+        "if": "ctx.log?.syslog?.appname == 'dawn' && ctx.message != null && ctx.message.indexOf('BSSID =') != -1",
+        "field": "message",
+        "pattern": "%{openwrt.dawn.msghead} BSSID = %{observer.mac} / %{source.mac}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "script": {
+        "tag": "dawn_probe_status",
+        "if": "ctx.log?.syslog?.appname == 'dawn' && ctx.openwrt?.dawn?.msghead != null",
+        "lang": "painless",
+        "source": "String s = ctx.openwrt.dawn.msghead; if (s.contains(\"is for new client\")) ctx.event.action = \"probe\"; else if (s.contains(\"updated client\")) ctx.event.action = \"probe_update\";"
+      }
+    },
+    {
+      "grok": {
+        "tag": "dawn_ping",
+        "if": "ctx.log?.syslog?.appname == 'dawn' && ctx.message != null && ctx.message.startsWith('Client: received ping')",
+        "field": "message",
+        "patterns": [
+          "Client: received ping from %{IP:destination.ip}:%{NUMBER:destination.port:long}"
+        ],
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dawn_ping_action",
+        "if": "ctx.log?.syslog?.appname == 'dawn' && ctx.destination?.ip != null",
+        "field": "event.action",
+        "value": "ping",
+        "ignore_failure": true
+      }
+    },
+    {
+      "grok": {
+        "tag": "dawn_pong",
+        "if": "ctx.log?.syslog?.appname == 'dawn' && ctx.message != null && ctx.message.startsWith('Server: received pong')",
+        "field": "message",
+        "patterns": [
+          "Server: received pong from %{IP:source.ip}:%{NUMBER:source.port:long}"
+        ],
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dawn_pong_action",
+        "if": "ctx.log?.syslog?.appname == 'dawn' && ctx.source?.ip != null",
+        "field": "event.action",
+        "value": "pong",
+        "ignore_failure": true
+      }
+    },
+    {
+      "append": {
+        "tag": "dawn_event_type",
+        "if": "ctx.log?.syslog?.appname == 'dawn'",
+        "field": "event.type",
+        "value": [
+          "info"
+        ],
+        "allow_duplicates": false,
+        "ignore_failure": true
+      }
+    },
+    {
+      "append": {
+        "tag": "dawn_event_category",
+        "if": "ctx.log?.syslog?.appname == 'dawn'",
+        "field": "event.category",
+        "value": [
+          "network"
+        ],
+        "allow_duplicates": false,
+        "ignore_failure": true
+      }
+    },
+
+    /* --- HOSTAPD --- */
+    {
+      "grok": {
+        "tag": "hostapd_main",
+        "if": "ctx.log?.syslog?.appname == 'hostapd'",
+        "field": "message",
+        "patterns": [
+          "%{DATA:observer.mac}: AP-STA-%{WORD:hostapd.event} %{MAC:source.mac}",
+          "%{DATA:observer.mac}: STA %{MAC:source.mac} %{GREEDYDATA:hostapd.event_detail}"
+        ],
+        "ignore_failure": true
+      }
+    },
+    {
+      "grok": {
+        "tag": "hostapd_detail_to_event",
+        "if": "ctx.log?.syslog?.appname == 'hostapd' && ctx.hostapd?.event_detail != null",
+        "field": "hostapd.event_detail",
+        "patterns": [
+          "IEEE 802\\.11: %{WORD:hostapd.event}",
+          "WPA: %{WORD:hostapd.event}"
+        ],
+        "ignore_failure": true
+      }
+    },
+    {
+      "grok": {
+        "tag": "hostapd_wifi_signal",
+        "if": "ctx.log?.syslog?.appname == 'hostapd' && ctx.message != null && ctx.message.contains('signal=')",
+        "field": "message",
+        "patterns": [
+          "signal=%{NUMBER:hostapd.rssi:long}"
+        ],
+        "ignore_failure": true
+      }
+    },
+    {
+      "grok": {
+        "tag": "hostapd_wifi_tx_rate",
+        "if": "ctx.log?.syslog?.appname == 'hostapd' && ctx.message != null && ctx.message.contains('tx_bitrate=')",
+        "field": "message",
+        "patterns": [
+          "tx_bitrate=%{NUMBER:hostapd.tx_rate:long}"
+        ],
+        "ignore_failure": true
+      }
+    },
+    {
+      "grok": {
+        "tag": "hostapd_wifi_freq",
+        "if": "ctx.log?.syslog?.appname == 'hostapd' && ctx.message != null && ctx.message.contains('freq=')",
+        "field": "message",
+        "patterns": [
+          "freq=%{NUMBER:hostapd.frequency:long}"
+        ],
+        "ignore_failure": true
+      }
+    },
+    {
+      "remove": {
+        "tag": "hostapd_rm_detail",
+        "if": "ctx.hostapd?.event_detail != null",
+        "field": "hostapd.event_detail",
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    },
+    {
+      "script": {
+        "tag": "hostapd_classify",
+        "if": "ctx.log?.syslog?.appname == 'hostapd'",
+        "lang": "painless",
+        "source": "String e = ctx.hostapd != null && ctx.hostapd.event != null ? ctx.hostapd.event.toLowerCase() : \"\"; if (e.contains(\"connected\") || e.equals(\"assoc\") || e.equals(\"authorized\")) { ctx.event = ctx.event != null ? ctx.event : new HashMap(); ctx.event.action = \"wifi_connected\"; ctx.event.outcome = \"success\"; ctx.event.type = [\"start\"]; ctx.event.category = [\"authentication\"]; } else if (e.contains(\"disconnected\") || e.equals(\"deauth\") || e.equals(\"disassoc\")) { ctx.event = ctx.event != null ? ctx.event : new HashMap(); ctx.event.action = \"wifi_disconnected\"; ctx.event.outcome = \"success\"; ctx.event.type = [\"end\"]; ctx.event.category = [\"authentication\"]; } else { ctx.event = ctx.event != null ? ctx.event : new HashMap(); ctx.event.action = \"wifi_event\"; if (ctx.message != null) { String m = ctx.message.toLowerCase(); if (m.contains(\"fail\") || m.contains(\"error\") || m.contains(\"mismatch\")) ctx.event.outcome = \"failure\"; else if (m.contains(\"timeout\") || m.contains(\"did not ack\") || m.contains(\"no response\")) ctx.event.outcome = \"unknown\"; else ctx.event.outcome = \"success\"; } if (ctx.event.type == null) ctx.event.type = [\"info\"]; }"
+      }
+    },
+
+    /* --- CLEANUP --- */
+    {
+      "remove": {
+        "field": [
+          "_tmp",
+          "_dhcp",
+          "hostapd.event"
+        ],
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    }
+  ],
+  "on_failure": [
+    {
+      "set": {
+        "field": "event.kind",
+        "value": "pipeline_error",
+        "ignore_failure": true
+      }
+    },
+    {
+      "append": {
+        "field": "error.message",
+        "value": "Processor {{ _ingest.on_failure_processor_type }} (tag={{ _ingest.on_failure_processor_tag }}) in {{ _ingest.on_failure_pipeline }}: {{ _ingest.on_failure_message }}",
+        "ignore_failure": true
+      }
+    }
+  ]
+}
+

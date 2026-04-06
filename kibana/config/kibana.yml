@@ -6,8 +6,14 @@ server.name: kibana
 server.host: 0.0.0.0
 elasticsearch.hosts: [ http://elasticsearch:9200 ]
 
+# Disable unused heavy plugins in this Filebeat+ELK setup
+xpack.fleet.enabled: false
+xpack.securitySolution.enabled: false
+
 monitoring.ui.container.elasticsearch.enabled: true
 monitoring.ui.container.logstash.enabled: true
+# Disable deprecated self-monitoring that sets xpack.monitoring.collection.enabled in ES
+monitoring.enabled: false
 
 ## Security credentials
 #
@@ -23,9 +29,14 @@ elasticsearch.password: ${KIBANA_SYSTEM_PASSWORD}
 ## https://www.elastic.co/docs/deploy-manage/security/self-setup
 ## https://www.elastic.co/docs/reference/kibana/commands/kibana-encryption-keys
 #
-#xpack.security.encryptionKey:
-#xpack.encryptedSavedObjects.encryptionKey:
-#xpack.reporting.encryptionKey:
+xpack.security.encryptionKey: 9cb91a21d8e647d2b0d7ea0f9df12f8a9b2e813ec7714b119af95a1dc2f8e467
+xpack.encryptedSavedObjects.encryptionKey: 4f2c1d69b30f8d14e7ab62f39cd5a04b28e16cf0d5b74a9a83f12ce6d917ab35
+xpack.reporting.encryptionKey: c87153f2aa6d40fe98bc12a64de0751b3f2c9e7d58a1146df0b7ae42c6d913ef
+
+# Disable phone-home telemetry to avoid connectivity warnings on isolated hosts
+telemetry.optIn: false
+telemetry.allowChangingOptInStatus: false
+telemetry.enabled: false
 
 ## Fleet
 ## https://www.elastic.co/docs/reference/kibana/configuration-reference/fleet-settings

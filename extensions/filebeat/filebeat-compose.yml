@@ -27,6 +27,8 @@ services:
     environment:
       FILEBEAT_INTERNAL_PASSWORD: ${FILEBEAT_INTERNAL_PASSWORD:-}
       BEATS_SYSTEM_PASSWORD: ${BEATS_SYSTEM_PASSWORD:-}
+    ports:
+      - "10514:10514/tcp"
     networks:
       - elk
     depends_on:

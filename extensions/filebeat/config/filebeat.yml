@@ -9,6 +9,25 @@ filebeat.config:
     path: ${path.config}/modules.d/*.yml
     reload.enabled: false
 
+
+filebeat.inputs:
+  - type: tcp
+    host: "0.0.0.0:10514"
+    tags: ["syslog-ng", "rfc3164"]
+    fields:
+      log_source: "syslog-ng"
+      log_transport: "tcp"
+    pipeline: syslog
+    processors:
+      - syslog:
+          field: message
+          format: rfc3164
+      - add_fields:
+          target: '@metadata'
+          fields:
+            pipeline: syslog
+
+
 filebeat.autodiscover:
   providers:
     # The Docker autodiscover provider automatically retrieves logs from Docker
@@ -16,9 +35,12 @@ filebeat.autodiscover:
     - type: docker
       hints.enabled: true
       hints.default_config:
-        type: container
+        type: filestream
+        id: docker-container-${data.container.id}
         paths:
           - /var/lib/docker/containers/${data.container.id}/*-json.log
+        parsers:
+          - container: ~
       templates:
         - condition:
             contains:
@@ -27,23 +49,48 @@ filebeat.autodiscover:
             - module: elasticsearch
               server:
                 input:
-                  type: container
+                  type: filestream
+                  id: elasticsearch-server-${data.container.id}
                   paths:
                     - /var/lib/docker/containers/${data.container.id}/*-json.log
+                  parsers:
+                    - container: ~
 
 processors:
   - add_cloud_metadata: ~
 
+# Internal monitoring disabled (deprecated beats monitoring API in ES 9.x)
 monitoring:
-  enabled: true
-  elasticsearch:
-    username: beats_system
-    password: ${BEATS_SYSTEM_PASSWORD}
+  enabled: false
+
+# === INDEX TEMPLATE: 1 shard, 0 replicas (single-node, Fix 3) ===
+setup.template.overwrite: true
+setup.template.settings:
+  index.number_of_shards: 1
+  index.number_of_replicas: 0
+
+# === ILM: rotate daily/500MB, delete after 7 days (Fix 4) ===
+setup.ilm.overwrite: true
+setup.ilm.policy_name: "filebeat"
+setup.ilm.policy:
+  phases:
+    hot:
+      actions:
+        rollover:
+          max_age: "1d"
+          max_size: "500mb"
+    delete:
+      min_age: "7d"
+      actions:
+        delete: {}
 
 output.elasticsearch:
   hosts: [ http://elasticsearch:9200 ]
   username: filebeat_internal
   password: ${FILEBEAT_INTERNAL_PASSWORD}
+  # === Fix 2: riduce burst di ingest verso ES ===
+  bulk_max_size: 500
+  worker: 1
 
 ## HTTP endpoint for health checking
 ## https://www.elastic.co/docs/reference/beats/filebeat/http-endpoint

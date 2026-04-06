@@ -5,5 +5,33 @@
 cluster.name: docker-cluster
 network.host: 0.0.0.0
 
-xpack.license.self_generated.type: trial
+xpack.license.self_generated.type: basic
 xpack.security.enabled: true
+# Disable transport SSL (single-node, no inter-node TLS needed)
+xpack.security.transport.ssl.enabled: false
+
+# === ELASTICSEARCH OPTIMIZATION FOR RPi4 ===
+# Date: 2026-04-06
+# Disable Machine Learning (not needed for syslog)
+xpack.ml.enabled: false
+
+# Disable Transform (not needed for logging)
+
+# Optimize roles for single node cluster
+node.roles: [data, data_cold, data_content, data_hot, data_warm, ingest, master, remote_cluster_client]
+
+# Thread pool optimization for ARM
+thread_pool.write.queue_size: 100
+thread_pool.search.queue_size: 100
+
+# === HEAP / CIRCUIT BREAKER TUNING ===
+# Limit fielddata cache to 100 MB to avoid heap exhaustion
+indices.fielddata.cache.size: 100mb
+
+# Reduce indexing buffer from default 10% to 5% (saves ~50 MB on 1 GB heap)
+indices.memory.index_buffer_size: 5%
+
+# Tighten circuit breakers to trip before OOM
+indices.breaker.total.limit: 95%
+indices.breaker.request.limit: 50%
+indices.breaker.fielddata.limit: 20%
