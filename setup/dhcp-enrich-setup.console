@@ -1,0 +1,156 @@
+# ============================================================
+# DHCP → IP enrichment setup for dawn/hostapd log correlation
+# Run these steps sequentially in Kibana Dev Tools.
+# Prerequisite: pipeline-syslog.json deployed and indexing DHCP events.
+# ============================================================
+
+
+# ─── STEP 1 ─── Index template for dhcp-leases-current
+# Ensures source.mac is keyword (not analyzed), source.ip is ip type.
+PUT /_index_template/dhcp-leases-current-template
+{
+  "index_patterns": ["dhcp-leases-current"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp":    { "type": "date" },
+        "source": {
+          "properties": {
+            "mac":    { "type": "keyword" },
+            "ip":     { "type": "ip" },
+            "domain": { "type": "keyword" }
+          }
+        }
+      }
+    }
+  }
+}
+
+
+# ─── STEP 2 ─── Continuous Transform: dhcp-leases-latest
+# Keeps one document per client MAC, always the most recent DHCPACK.
+# IMPORTANT: adjust "filebeat-*" if your index pattern is different.
+PUT /_transform/dhcp-leases-transform
+{
+  "description": "Latest DHCPACK per MAC address, for enrich-processor lookup",
+  "source": {
+    "index": ["filebeat-*"],
+    "query": {
+      "term": { "event.action": "DHCPACK" }
+    }
+  },
+  "latest": {
+    "unique_key": ["source.mac"],
+    "sort": "@timestamp"
+  },
+  "dest": {
+    "index": "dhcp-leases-current"
+  },
+  "sync": {
+    "time": {
+      "field": "@timestamp",
+      "delay": "60s"
+    }
+  },
+  "frequency": "5m"
+}
+
+# Start the transform (runs continuously in the background)
+POST /_transform/dhcp-leases-transform/_start
+
+
+# ─── STEP 3 ─── Enrich Policy
+# Match on MAC address; enrich with IP and hostname.
+PUT /_enrich/policy/dhcp-leases-policy
+{
+  "match": {
+    "indices": "dhcp-leases-current",
+    "match_field": "source.mac",
+    "enrich_fields": ["source.ip", "source.domain"]
+  }
+}
+
+# Execute the policy to build the first snapshot.
+# Must be re-executed after new leases are indexed (see Step 4).
+POST /_enrich/policy/dhcp-leases-policy/_execute
+
+
+# ─── STEP 4 ─── Deploy/update the ingest pipeline
+# Paste the full contents of pipeline-syslog.json here, replacing <PIPELINE_JSON>:
+#
+#   PUT /_ingest/pipeline/syslog
+#   <PIPELINE_JSON>
+#
+# Or use Kibana Stack Management → Ingest Pipelines → Import.
+
+
+# ─── STEP 5 ─── Automate policy re-execution (every 5 minutes)
+# Option A — Kibana Watcher (requires Platinum/Enterprise license):
+PUT /_watcher/watch/dhcp-enrich-policy-refresh
+{
+  "trigger": {
+    "schedule": { "interval": "5m" }
+  },
+  "actions": {
+    "execute_enrich_policy": {
+      "webhook": {
+        "method": "POST",
+        "host": "localhost",
+        "port": 9200,
+        "path": "/_enrich/policy/dhcp-leases-policy/_execute",
+        "auth": {
+          "basic": {
+            "username": "elastic",
+            "password": "{{ctx.metadata.password}}"
+          }
+        }
+      }
+    }
+  }
+}
+
+# Option B — Docker Compose (add to docker-compose.yml, no license needed):
+# See comments in docker-compose.yml or run manually:
+#   curl -X POST -u elastic:<password> http://localhost:9200/_enrich/policy/dhcp-leases-policy/_execute
+
+
+# ─── VERIFICATION ─── Quick sanity checks after setup
+
+# 1. Check transform state (should be "started" or "indexing")
+GET /_transform/dhcp-leases-transform/_stats
+
+# 2. Check populated leases
+GET /dhcp-leases-current/_search
+{
+  "size": 5,
+  "_source": ["source.mac", "source.ip", "source.domain", "@timestamp"]
+}
+
+# 3. Check that dawn event has source.ip enriched
+GET /filebeat-*/_search
+{
+  "size": 3,
+  "query": {
+    "term": { "log.syslog.appname": "dawn" }
+  },
+  "_source": ["source.mac", "source.ip", "source.domain", "observer.mac", "event.action", "@timestamp"]
+}
+
+# 4. Check a hostapd connect event
+GET /filebeat-*/_search
+{
+  "size": 3,
+  "query": {
+    "bool": {
+      "must": [
+        { "term": { "log.syslog.appname": "hostapd" } },
+        { "term": { "event.action": "wifi_connected" } }
+      ]
+    }
+  },
+  "_source": ["source.mac", "source.ip", "source.domain", "event.action", "host.hostname", "@timestamp"]
+}

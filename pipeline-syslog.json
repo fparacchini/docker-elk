@@ -147,6 +147,16 @@
       }
     },
     {
+      "gsub": {
+        "tag": "dnsmasq_dhcp_strip_txid",
+        "if": "ctx.log?.syslog?.appname == 'dnsmasq-dhcp' && ctx.message != null",
+        "field": "message",
+        "pattern": "^[0-9]+\\s",
+        "replacement": "",
+        "ignore_failure": true
+      }
+    },
+    {
       "dissect": {
         "tag": "dnsmasq_query",
         "if": "ctx.log?.syslog?.appname == 'dnsmasq' && ctx.message != null && ctx.message.startsWith('query')",
@@ -325,7 +335,16 @@
         "tag": "dhcp_line",
         "if": "(ctx.log?.syslog?.appname == 'dnsmasq-dhcp') || (ctx.log?.syslog?.appname == 'dnsmasq' && ctx.message != null && ctx.message.startsWith('DHCP'))",
         "field": "message",
-        "pattern": "%{_dhcp.action}(%{_dhcp.iface}) %{?_dhcp.ip} %{_dhcp.mac} %{?_dhcp.hostname}",
+        "pattern": "%{_dhcp.action}(%{_dhcp.iface}) %{_dhcp.ip} %{_dhcp.mac} %{_dhcp.hostname}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "dissect": {
+        "tag": "dhcp_line_no_hostname",
+        "if": "ctx._dhcp?.ip == null && ((ctx.log?.syslog?.appname == 'dnsmasq-dhcp') || (ctx.log?.syslog?.appname == 'dnsmasq' && ctx.message != null && ctx.message.startsWith('DHCP')))",
+        "field": "message",
+        "pattern": "%{_dhcp.action}(%{_dhcp.iface}) %{_dhcp.ip} %{_dhcp.mac}",
         "ignore_failure": true
       }
     },
@@ -486,7 +505,9 @@
         "field": "message",
         "patterns": [
           "%{DATA:observer.mac}: AP-STA-%{WORD:hostapd.event} %{MAC:source.mac}",
-          "%{DATA:observer.mac}: STA %{MAC:source.mac} %{GREEDYDATA:hostapd.event_detail}"
+          "AP-STA-%{WORD:hostapd.event} %{MAC:source.mac}",
+          "%{DATA:observer.mac}: STA %{MAC:source.mac} %{GREEDYDATA:hostapd.event_detail}",
+          "STA %{MAC:source.mac} %{GREEDYDATA:hostapd.event_detail}"
         ],
         "ignore_failure": true
       }
@@ -551,6 +572,37 @@
         "if": "ctx.log?.syslog?.appname == 'hostapd'",
         "lang": "painless",
         "source": "String e = ctx.hostapd != null && ctx.hostapd.event != null ? ctx.hostapd.event.toLowerCase() : \"\"; if (e.contains(\"connected\") || e.equals(\"assoc\") || e.equals(\"authorized\")) { ctx.event = ctx.event != null ? ctx.event : new HashMap(); ctx.event.action = \"wifi_connected\"; ctx.event.outcome = \"success\"; ctx.event.type = [\"start\"]; ctx.event.category = [\"authentication\"]; } else if (e.contains(\"disconnected\") || e.equals(\"deauth\") || e.equals(\"disassoc\")) { ctx.event = ctx.event != null ? ctx.event : new HashMap(); ctx.event.action = \"wifi_disconnected\"; ctx.event.outcome = \"success\"; ctx.event.type = [\"end\"]; ctx.event.category = [\"authentication\"]; } else { ctx.event = ctx.event != null ? ctx.event : new HashMap(); ctx.event.action = \"wifi_event\"; if (ctx.message != null) { String m = ctx.message.toLowerCase(); if (m.contains(\"fail\") || m.contains(\"error\") || m.contains(\"mismatch\")) ctx.event.outcome = \"failure\"; else if (m.contains(\"timeout\") || m.contains(\"did not ack\") || m.contains(\"no response\")) ctx.event.outcome = \"unknown\"; else ctx.event.outcome = \"success\"; } if (ctx.event.type == null) ctx.event.type = [\"info\"]; }"
+      }
+    },
+
+    /* --- DHCP ENRICH (dawn + hostapd: add IP/hostname from last DHCP lease) --- */
+    {
+      "enrich": {
+        "tag": "dhcp_enrich_lookup",
+        "if": "ctx.source?.mac != null && ['dawn','hostapd'].contains(ctx.log?.syslog?.appname)",
+        "policy_name": "dhcp-leases-policy",
+        "field": "source.mac",
+        "target_field": "_tmp.dhcp_enrich",
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dhcp_enrich_ip",
+        "if": "ctx._tmp?.dhcp_enrich?.source?.ip != null && ctx.source?.ip == null",
+        "field": "source.ip",
+        "value": "{{_tmp.dhcp_enrich.source.ip}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "tag": "dhcp_enrich_domain",
+        "if": "ctx._tmp?.dhcp_enrich?.source?.domain != null && ctx.source?.domain == null",
+        "field": "source.domain",
+        "value": "{{_tmp.dhcp_enrich.source.domain}}",
+        "ignore_failure": true
       }
     },
 

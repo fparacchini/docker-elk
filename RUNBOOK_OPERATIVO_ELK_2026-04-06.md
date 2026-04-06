@@ -120,3 +120,137 @@ docker compose up -d --force-recreate
 - `telemetry.enabled: false`
 - `xpack.fleet.enabled: false`
 - `xpack.securitySolution.enabled: false`
+
+---
+
+## 10) DHCP Enrichment Pipeline – OpenWRT (2026-04-06)
+
+Arricchimento automatico degli eventi `dawn` e `hostapd` con l'IP e l'hostname assegnati da `dnsmasq-dhcp`, tramite lookup MAC Address → DHCP lease.
+
+### Architettura
+
+```
+dnsmasq-dhcp DHCPACK  →  pipeline syslog  →  filebeat-*
+                                                   ↓
+                                     dhcp-leases-refresh.py (cron */5)
+                                                   ↓
+                                         dhcp-leases-current (1 doc/MAC)
+                                                   ↓
+                                       dhcp-leases-policy (enrich snapshot)
+                                                   ↓
+dawn/hostapd event  →  pipeline syslog  →  enrich processor
+                              ↓
+               source.ip + source.domain aggiunti al documento
+```
+
+### Bug corretti in `pipeline-syslog.json`
+
+| Tag processor | Problema | Fix |
+|---|---|---|
+| `dhcp_line` | `%{?_dhcp.ip}` e `%{?_dhcp.hostname}` — il modificatore `?` scartava i valori; `source.ip` e `source.domain` non venivano mai impostati | Rimosso `?` da entrambi i campi |
+| `dnsmasq_dhcp_strip_txid` | I messaggi `dnsmasq-dhcp` avevano un transaction-ID numerico prefisso (`3277264775 DHCPACK…`) che veniva incluso in `event.action` | Aggiunto `gsub` che rimuove `^[0-9]+\s` |
+| `hostapd_main` | I pattern grok richiedevano il prefisso `interface:` (`wlan0: AP-STA-…`), ma i messaggi reali post-forwarding ne sono privi | Aggiunti pattern alternativi senza prefisso interfaccia |
+| `dhcp_line_no_hostname` | Alcuni messaggi DHCP non includono il campo hostname (es. device senza opzione DHCP 12) | Aggiunto dissect di fallback senza il campo hostname |
+
+### Nuovi processor aggiunti (blocco `DHCP ENRICH`)
+
+Posizionati dopo i blocchi `HOSTAPD` e prima di `CLEANUP`:
+
+- `dhcp_enrich_lookup` — `enrich` processor: lookup `source.mac` → policy `dhcp-leases-policy`, risultato in `_tmp.dhcp_enrich`
+- `dhcp_enrich_ip` — `set`: copia `_tmp.dhcp_enrich.source.ip` → `source.ip` (solo se non già presente)
+- `dhcp_enrich_domain` — `set`: copia `_tmp.dhcp_enrich.source.domain` → `source.domain` (solo se non già presente)
+
+### Risorse Elasticsearch create
+
+```bash
+# Index template (mapping esplicito mac=keyword, ip=ip)
+PUT /_index_template/dhcp-leases-current-template
+
+# Enrich policy
+PUT /_enrich/policy/dhcp-leases-policy
+# { "match": { "indices": "dhcp-leases-current", "match_field": "source.mac",
+#   "enrich_fields": ["source.ip", "source.domain"] } }
+
+# Prima esecuzione (necessaria dopo ogni modifica alla policy)
+POST /_enrich/policy/dhcp-leases-policy/_execute
+```
+
+> **Nota**: il nodo non ha il ruolo `transform` (`xpack.ml.enabled: false` + roles espliciti in `elasticsearch.yml`). Il Continuous Transform è sostituito dallo script cron.
+
+### Script di refresh: `setup/dhcp-leases-refresh.py`
+
+Eseguito ogni 5 minuti via cron. Operazioni:
+1. Scroll di tutti i messaggi `DHCPACK` da `filebeat-*` (ordinati per `@timestamp asc` → tiene il più recente per MAC)
+2. Bulk upsert su `dhcp-leases-current` (doc-id = MAC con `:` → `-`)
+3. `POST /_enrich/policy/dhcp-leases-policy/_execute`
+
+```bash
+# Cron attivo (utente fparacchini)
+*/5 * * * * /usr/bin/python3 /opt/docker-elk/setup/dhcp-leases-refresh.py >> /var/log/dhcp-leases-refresh.log 2>&1
+
+# Esecuzione manuale
+python3 /opt/docker-elk/setup/dhcp-leases-refresh.py
+
+# Log
+tail -f /var/log/dhcp-leases-refresh.log
+```
+
+### Deploy pipeline in produzione
+
+```bash
+cd /opt/docker-elk
+python3 - <<'EOF'
+import re, json, urllib.request, base64
+with open('pipeline-syslog.json') as f:
+    raw = f.read()
+cleaned = re.sub(r'/\*.*?\*/', '', raw, flags=re.DOTALL)
+payload = json.dumps(json.loads(cleaned)).encode()
+req = urllib.request.Request('http://localhost:9200/_ingest/pipeline/syslog', data=payload, method='PUT')
+req.add_header('Content-Type', 'application/json')
+req.add_header('Authorization', 'Basic ' + base64.b64encode(b'elastic:<PASSWORD>').decode())
+with urllib.request.urlopen(req) as r:
+    print(r.status, r.read().decode())
+EOF
+```
+
+### Verifica end-to-end (simulate)
+
+```bash
+curl -s -u elastic:<PASSWORD> 'http://localhost:9200/_ingest/pipeline/syslog/_simulate' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "docs": [{
+    "_source": {
+      "message": "AP-STA-CONNECTED 46:aa:0e:f7:61:0e auth_alg=sae",
+      "log": { "syslog": { "appname": "hostapd", "hostname": "AP-1" } },
+      "host": { "hostname": "AP-1" }
+    }
+  }]
+}' | python3 -c "
+import sys,json
+d=json.load(sys.stdin)['docs'][0]['doc']['_source']
+print('source.mac   :', d.get('source',{}).get('mac'))
+print('source.ip    :', d.get('source',{}).get('ip'))
+print('source.domain:', d.get('source',{}).get('domain'))
+print('event.action :', d.get('event',{}).get('action'))
+"
+# Atteso: source.ip e source.domain valorizzati per MAC noto
+```
+
+### Dashboard Kibana
+
+Dashboard "DHCP & WiFi Events – OpenWRT":
+- URL: `http://localhost:5601/app/dashboards#/view/dash-dhcp-wifi-openwrt`
+- Script di (ri)creazione: `setup/kibana-dashboard-create.py` (idempotente, `?overwrite=true`)
+
+```bash
+python3 /opt/docker-elk/setup/kibana-dashboard-create.py
+```
+
+| Panel | Tipo | Sorgente | Contenuto |
+|---|---|---|---|
+| DHCP Leases – IP Assegnati | Lens Datatable | `dhcp-leases-current` | MAC, IP, Hostname, Ultimo DHCPACK |
+| WiFi Events Nel Tempo | Lens XY bar stacked | `filebeat-*` | Conteggio eventi per app nel tempo |
+| WiFi Events Log | Discover | `filebeat-*` | Log dettagliato con appname, mac, ip, domain, action, host |
+
+Cliccare su MAC o IP nel primo panel aggiunge un filtro globale che filtra automaticamente gli altri due panel.
