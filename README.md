@@ -107,6 +107,7 @@ necessary to get things up and running.
 
 By default, the stack exposes the following ports:
 
+* 10514: Filebeat TCP syslog input
 * 5044: Logstash Beats input
 * 50000: Logstash TCP input
 * 9600: Logstash monitoring API
@@ -164,6 +165,9 @@ If everything went well and the setup completed without error, start the other s
 ```sh
 docker compose up
 ```
+
+In this workspace, Filebeat is included in the main Compose file and starts with the rest of the stack, exposing a TCP
+syslog input on port `10514`.
 
 > [!NOTE]
 > You can also run all services in the background (detached mode) by appending the `-d` flag to the above command.

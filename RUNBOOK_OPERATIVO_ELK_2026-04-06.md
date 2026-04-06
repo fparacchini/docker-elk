@@ -17,7 +17,7 @@ curl -u elastic:changeme2025 "http://localhost:9200/_cluster/health?pretty"
 
 ## 1) Applicare configurazione
 ```bash
-docker compose -f docker-compose.yml -f extensions/filebeat/filebeat-compose.yml up -d --force-recreate elasticsearch filebeat kibana
+docker compose up -d --force-recreate elasticsearch filebeat kibana
 ```
 
 ## 2) Attendere Elasticsearch pronto
@@ -41,10 +41,10 @@ curl -u elastic:changeme2025 -X PUT "http://localhost:9200/_cluster/settings" -H
 
 ## 4) Verifica rapida salute stack
 ```bash
-docker compose -f docker-compose.yml -f extensions/filebeat/filebeat-compose.yml ps
+docker compose ps
 docker stats --no-stream
 
-docker compose -f docker-compose.yml -f extensions/filebeat/filebeat-compose.yml logs --since=5m elasticsearch filebeat kibana
+docker compose logs --since=5m elasticsearch filebeat kibana
 ```
 
 ## 5) Health-check automatico syslog end-to-end
@@ -74,7 +74,7 @@ curl -s -u elastic:changeme2025 -H 'Content-Type: application/json' \
 1. Ripristinare i file configurazione da backup/version control.
 2. Riavviare servizi:
 ```bash
-docker compose -f docker-compose.yml -f extensions/filebeat/filebeat-compose.yml up -d --force-recreate
+docker compose up -d --force-recreate
 ```
 
 ## 8) Parametri finali applicati (promemoria)

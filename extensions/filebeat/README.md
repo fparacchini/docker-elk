@@ -10,12 +10,14 @@ Elasticsearch or Logstash for indexing.
 password.** In case you haven't done that during the initial startup of the stack, please refer to [How to re-execute
 the setup][setup] to run the setup container again and initialize these users.
 
-To include Filebeat in the stack, run Docker Compose from the root of the repository with an additional command line
-argument referencing the `filebeat-compose.yml` file:
+In this workspace, Filebeat is already included in the root Compose file, so a standard startup command is enough:
 
 ```console
-$ docker compose -f docker-compose.yml -f extensions/filebeat/filebeat-compose.yml up
+$ docker compose up
 ```
+
+The dedicated `filebeat-compose.yml` file can still be used if you explicitly want to run Filebeat as an optional
+overlay in a different environment.
 
 ## Configuring Filebeat
 
@@ -25,7 +27,7 @@ the help of the [Configuration reference][filebeat-config].
 Any change to the Filebeat configuration requires a restart of the Filebeat container:
 
 ```console
-$ docker compose -f docker-compose.yml -f extensions/filebeat/filebeat-compose.yml restart filebeat
+$ docker compose restart filebeat
 ```
 
 Please refer to the following documentation page for more details about how to configure Filebeat inside a Docker
